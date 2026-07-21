@@ -1,17 +1,26 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
+import re
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 # 페이지 기본 설정
 st.set_page_config(page_title="폰테크 회선 및 페이백 관리", page_icon="📱", layout="wide")
 
+# 전화번호 하이픈 자동 포맷팅 함수 (01012345678 -> 010-1234-5678)
+def format_phone_number(phone):
+    clean_num = re.sub(r'[^0-9]', '', phone)
+    if len(clean_num) == 11:
+        return f"{clean_num[:3]}-{clean_num[3:7]}-{clean_num[7:]}"
+    elif len(clean_num) == 10:
+        return f"{clean_num[:3]}-{clean_num[3:6]}-{clean_num[6:]}"
+    return phone
+
 # DB 연결 및 초기화
 conn = sqlite3.connect('mobile_management.db', check_same_thread=False)
 cursor = conn.cursor()
 
-# 1. 회선 테이블
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS lines (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -21,7 +30,6 @@ CREATE TABLE IF NOT EXISTS lines (
 )
 ''')
 
-# 2. 월별 회차 테이블
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS payback_schedules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,7 +40,6 @@ CREATE TABLE IF NOT EXISTS payback_schedules (
 )
 ''')
 
-# 3. 회차별 세부 페이백 항목 테이블
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS payback_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,7 +55,7 @@ conn.commit()
 
 st.title("📱 폰테크 회선 & 월별 캐시백 관리 앱")
 
-# Session State 초기화 (다중 페이백 동적 입력용)
+# Session State 초기화
 if 'payback_item_list' not in st.session_state:
     st.session_state.payback_item_list = [
         {"type": "네이버페이", "amount": 30000},
@@ -60,8 +67,8 @@ if 'payback_item_list' not in st.session_state:
 # ---------------------------------------------------------
 with st.sidebar:
     st.header("➕ 회선 및 복수 캐시백 등록")
-    name = st.text_input("명의자 이름")
-    phone = st.text_input("전화번호", "010-0000-0000")
+    name = st.text_input("명의자 이름", key="input_name")
+    phone_raw = st.text_input("전화번호 (숫자만 입력해도 자동 변환)", value="010-0000-0000", key="input_phone")
     carrier = st.selectbox("통신사", ["SKT", "KT", "LGU+", "알뜰폰(SKT망)", "알뜰폰(KT망)", "알뜰폰(LGU+망)"])
     
     st.divider()
@@ -78,7 +85,7 @@ with st.sidebar:
         item['amount'] = c2.number_input(f"금액 #{idx+1}", value=int(item['amount']), step=5000, key=f"amt_{idx}")
 
     col_add, col_del = st.columns(2)
-    if col_add.button("➕ 혜택 항목 추가"):
+    if col_add.button("➕ 혜택 추가"):
         st.session_state.payback_item_list.append({"type": "네이버페이", "amount": 10000})
         st.rerun()
     if col_del.button("➖ 마지막 삭제") and len(st.session_state.payback_item_list) > 1:
@@ -86,10 +93,15 @@ with st.sidebar:
         st.rerun()
         
     st.divider()
-    if st.button("🚀 회선 및 전체 일정 생성", type="primary"):
-        if name:
+    # 상단/하단 어디서든 누르기 편하게 저장 버튼 강조
+    save_btn = st.button("💾 이 회선 및 캐시백 일정 저장하기", type="primary", use_container_width=True)
+    
+    if save_btn:
+        if name and phone_raw:
+            formatted_phone = format_phone_number(phone_raw)
+            
             cursor.execute("INSERT INTO lines (person_name, phone_number, carrier) VALUES (?, ?, ?)", 
-                           (name, phone, carrier))
+                           (name, formatted_phone, carrier))
             line_id = cursor.lastrowid
             
             base_date = datetime(start_date.year, start_date.month, 1)
@@ -110,8 +122,10 @@ with st.sidebar:
                     ''', (schedule_id, p_item['type'], p_item['amount']))
                 
             conn.commit()
-            st.success(f"{name}님 회선 및 {months_count}개월간 다중 캐시백 일정이 추가되었습니다!")
+            st.success(f"✅ {name}님 회선({formatted_phone}) 및 {months_count}개월간 캐시백 일정이 정상 저장되었습니다!")
             st.rerun()
+        else:
+            st.error("⚠️ 명의자 이름과 전화번호를 입력해 주세요.")
 
 # ---------------------------------------------------------
 # 메인 화면: 월별 입금 체크리스트
@@ -173,4 +187,4 @@ if not df.empty:
     col_m1.metric("해당 월 총 수령 예정액", f"{total_expected:,.0f} 원")
     col_m2.metric("현재 완료된 수령액", f"{total_received:,.0f} 원", delta=f"{total_received - total_expected:,.0f} 원")
 else:
-    st.info("등록된 회선이 없습니다. 좌측 사이드바에서 회선을 추가해 보세요.")
+    st.info("등록된 회선이 없습니다. 왼쪽 사이드바에서 회선 정보 입력 후 아래의 [💾 저장하기] 버튼을 눌러보세요.")
