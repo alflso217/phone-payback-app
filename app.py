@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS lines (
     person_name TEXT,
     phone_number TEXT,
     carrier TEXT,
+    sub_carrier TEXT,
     device_model TEXT,
     payment_card TEXT,
     monthly_fee REAL DEFAULT 0,
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS lines (
 # 기존 DB 구조 자동 업데이트
 existing_cols = [col[1] for col in cursor.execute("PRAGMA table_info(lines)").fetchall()]
 new_cols = {
+    'sub_carrier': 'TEXT',
     'device_model': 'TEXT',
     'opening_payback': 'REAL DEFAULT 0',
     'device_sale_price': 'REAL DEFAULT 0',
@@ -111,7 +113,8 @@ with st.sidebar:
         
         edit_name = line_data[cols_map['person_name']]
         edit_phone = line_data[cols_map['phone_number']]
-        edit_carrier = line_data[cols_map['carrier']]
+        edit_carrier = line_data[cols_map['carrier']] or "SKT"
+        edit_sub_carrier = line_data[cols_map['sub_carrier']] or ""
         edit_device = line_data[cols_map['device_model']] or ""
         edit_card = line_data[cols_map['payment_card']] or ""
         edit_fee = float(line_data[cols_map['monthly_fee']] or 0)
@@ -132,7 +135,8 @@ with st.sidebar:
         st.header("➕ 신규 회선 및 캐시백 등록")
         edit_name = ""
         edit_phone = "010-0000-0000"
-        edit_carrier = "알뜰폰(SKT망)"
+        edit_carrier = "SKT"
+        edit_sub_carrier = ""
         edit_device = ""
         edit_card = ""
         edit_fee = 33000.0
@@ -147,13 +151,26 @@ with st.sidebar:
 
     name = st.text_input("명의자 이름", value=edit_name)
     phone_raw = st.text_input("전화번호", value=edit_phone)
-    carrier = st.selectbox("통신사", ["SKT", "KT", "LGU+", "알뜰폰(SKT망)", "알뜰폰(KT망)", "알뜰폰(LGU+망)"], index=0)
+    
+    carrier_list = ["SKT", "KT", "LGU+", "알뜰폰(SKT망)", "알뜰폰(KT망)", "알뜰폰(LGU+망)"]
+    carrier_idx = carrier_list.index(edit_carrier) if edit_carrier in carrier_list else 0
+    carrier = st.selectbox("통신사", carrier_list, index=carrier_idx)
+    
+    # 별정/알뜰폰 선택 시 수기 입력칸 제공
+    sub_carrier = ""
+    if "알뜰폰" in carrier:
+        sub_carrier = st.text_input("세부 별정통신사명 수기 입력", value=edit_sub_carrier, placeholder="예: 모비티, 프리티, 핀다이렉트 등")
+    
     device_model = st.text_input("휴대폰 기종", value=edit_device, placeholder="예: 갤럭시 S24, 아이폰 15")
     
-    st.divider()
-    st.subheader("💵 개통 초기 정산 & 기기 판매")
-    opening_payback = st.number_input("개통 시 즉시 페이백 (원)", value=int(edit_op_payback), step=10000)
-    device_sale_price = st.number_input("📱 기기 판매 수익 (원)", value=int(edit_sale_price), step=10000, help="폰 팔아서 얻은 단말기 판매대금")
+    # 3대 통신사(SKT, KT, LGU+)일 때만 정산/판매가 조건부 노출
+    opening_payback = 0.0
+    device_sale_price = 0.0
+    if carrier in ["SKT", "KT", "LGU+"]:
+        st.divider()
+        st.subheader("💵 개통 초기 정산 & 기기 판매")
+        opening_payback = st.number_input("개통 시 즉시 페이백 (원)", value=int(edit_op_payback), step=10000)
+        device_sale_price = st.number_input("📱 기기 판매 수익 (원)", value=int(edit_sale_price), step=10000, help="폰 팔아서 얻은 단말기 판매대금")
     
     st.divider()
     st.subheader("💳 요금 및 결제 정보")
@@ -169,11 +186,10 @@ with st.sidebar:
 
     st.divider()
     st.subheader("📝 유의사항 및 이벤트 캡쳐")
-    notes = st.text_area("기타 유의사항 / 메모", value=edit_notes, placeholder="예: 6개월 유지 필수, 회선 유지 기간 동안 데이터 사용량 조건 등")
+    notes = st.text_area("기타 유의사항 / 메모", value=edit_notes, placeholder="예: 6개월 유지 필수, 데이터 사용 조건 등")
     
     uploaded_file = st.file_uploader("이벤트 안내 캡쳐 이미지 업로드", type=["png", "jpg", "jpeg"])
     
-    # 이미지 데이터 처리
     img_blob = edit_img_bytes
     if uploaded_file is not None:
         img_blob = uploaded_file.read()
@@ -208,26 +224,26 @@ with st.sidebar:
             formatted_phone = format_phone_number(phone_raw)
             cursor.execute('''
             UPDATE lines 
-            SET person_name=?, phone_number=?, carrier=?, device_model=?, payment_card=?, monthly_fee=?, 
+            SET person_name=?, phone_number=?, carrier=?, sub_carrier=?, device_model=?, payment_card=?, monthly_fee=?, 
                 opening_payback=?, device_sale_price=?, opening_date=?, plan_change_date=?, cancellation_date=?, 
                 status=?, notes=?, event_image=?
             WHERE id=?
-            ''', (name, formatted_phone, carrier, device_model, payment_card, monthly_fee, 
+            ''', (name, formatted_phone, carrier, sub_carrier, device_model, payment_card, monthly_fee, 
                   opening_payback, device_sale_price, opening_date.strftime("%Y-%m-%d"), 
                   plan_change_date.strftime("%Y-%m-%d"), cancellation_date.strftime("%Y-%m-%d"), 
                   status, notes, sqlite3.Binary(img_blob) if img_blob else None, st.session_state.edit_line_id))
             conn.commit()
             st.session_state.edit_line_id = None
-            st.success("✅ 회선 및 유의사항 정보가 수정되었습니다!")
+            st.success("✅ 회선 정보가 성공적으로 수정되었습니다!")
             st.rerun()
     else:
         if st.button("🚀 신규 회선 및 일정 등록", type="primary", use_container_width=True):
             if name and phone_raw:
                 formatted_phone = format_phone_number(phone_raw)
                 cursor.execute('''
-                INSERT INTO lines (person_name, phone_number, carrier, device_model, payment_card, monthly_fee, opening_payback, device_sale_price, opening_date, plan_change_date, cancellation_date, status, notes, event_image)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (name, formatted_phone, carrier, device_model, payment_card, monthly_fee, 
+                INSERT INTO lines (person_name, phone_number, carrier, sub_carrier, device_model, payment_card, monthly_fee, opening_payback, device_sale_price, opening_date, plan_change_date, cancellation_date, status, notes, event_image)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (name, formatted_phone, carrier, sub_carrier, device_model, payment_card, monthly_fee, 
                       opening_payback, device_sale_price, opening_date.strftime("%Y-%m-%d"), 
                       plan_change_date.strftime("%Y-%m-%d"), cancellation_date.strftime("%Y-%m-%d"), status, notes, sqlite3.Binary(img_blob) if img_blob else None))
                 line_id = cursor.lastrowid
@@ -262,6 +278,7 @@ with tab1:
         l.person_name,
         l.phone_number,
         l.carrier,
+        l.sub_carrier,
         l.device_model,
         l.payment_card,
         l.monthly_fee,
@@ -298,12 +315,13 @@ with tab1:
         st.divider()
         st.write("#### 회선별 세부 지급 내역")
         
-        for (person, phone, carrier, device, card, fee, notes, inst), group in month_df.groupby(['person_name', 'phone_number', 'carrier', 'device_model', 'payment_card', 'monthly_fee', 'notes', 'installment_no']):
+        for (person, phone, carrier, sub_carrier, device, card, fee, notes, inst), group in month_df.groupby(['person_name', 'phone_number', 'carrier', 'sub_carrier', 'device_model', 'payment_card', 'monthly_fee', 'notes', 'installment_no']):
+            carrier_str = f"{carrier} ({sub_carrier})" if sub_carrier else carrier
             device_info = f" | 📲 {device}" if device else ""
             card_info = f" | 💳 {card}" if card else ""
             fee_info = f" | 💸 월 {fee:,.0f}원" if fee else ""
             
-            with st.expander(f"👤 **{person}** ({carrier} / {phone}){device_info}{card_info}{fee_info} - {inst}회차", expanded=True):
+            with st.expander(f"👤 **{person}** ({carrier_str} / {phone}){device_info}{card_info}{fee_info} - {inst}회차", expanded=True):
                 if notes:
                     st.info(f"📌 **유의사항/메모:** {notes}")
                 for _, row in group.iterrows():
@@ -337,7 +355,9 @@ with tab2:
                 
                 status_badge = f"[{line['status']}]" if line['status'] else ""
                 device_str = f" ({line['device_model']})" if line['device_model'] else ""
-                c_head.markdown(f"#### 📱 {line['person_name']} | {line['phone_number']} ({line['carrier']}){device_str} `{status_badge}`")
+                carrier_display = f"{line['carrier']} ({line['sub_carrier']})" if line['sub_carrier'] else line['carrier']
+                
+                c_head.markdown(f"#### 📱 {line['person_name']} | {line['phone_number']} ({carrier_display}){device_str} `{status_badge}`")
                 
                 if c_btn1.button("✏️ 수정", key=f"edit_{line_id}"):
                     st.session_state.edit_line_id = line_id
@@ -365,7 +385,6 @@ with tab2:
                 
                 st.caption(f"📅 개통일: {line['opening_date'] or '미입력'} | 🔄 요금제 변경: {p_change_str} | 📌 해지/번이 가능일: {line['cancellation_date'] or '미입력'}")
                 
-                # 유의사항 및 이미지 미리보기
                 if line['notes']:
                     st.warning(f"📝 **기타 유의사항:** {line['notes']}")
                 
@@ -392,6 +411,7 @@ with tab3:
             l.person_name,
             l.phone_number,
             l.carrier,
+            l.sub_carrier,
             l.device_model,
             l.opening_payback,
             l.device_sale_price,
@@ -426,8 +446,9 @@ with tab3:
         for _, row in y_df.iterrows():
             line_total = row['device_sale_price'] + row['opening_payback'] + row['total_monthly_giftcards']
             dev_str = f" ({row['device_model']})" if row['device_model'] else ""
+            c_disp = f"{row['carrier']} ({row['sub_carrier']})" if row['sub_carrier'] else row['carrier']
             
-            with st.expander(f"👤 **{row['person_name']}** - {row['phone_number']}{dev_str} | 💰 총 수익: {line_total:,.0f}원"):
+            with st.expander(f"👤 **{row['person_name']}** - {row['phone_number']} [{c_disp}]{dev_str} | 💰 총 수익: {line_total:,.0f}원"):
                 c1, c2, c3, c4 = st.columns(4)
                 c1.write(f"📱 **폰 판매 수익:** {row['device_sale_price']:,.0f}원")
                 c2.write(f"🎁 **개통 페이백:** {row['opening_payback']:,.0f}원")
