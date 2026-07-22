@@ -17,7 +17,7 @@ def format_phone_number(phone):
         return f"{clean_num[:3]}-{clean_num[3:6]}-{clean_num[6:]}"
     return phone
 
-# DB 연결 및 컬럼 자동 업데이트(마이그레이션)
+# DB 연결 및 테이블 생성
 conn = sqlite3.connect('mobile_management.db', check_same_thread=False)
 cursor = conn.cursor()
 
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS lines (
 )
 ''')
 
-# 기존 DB 구조 자동 업데이트
+# 기존 DB 마이그레이션
 existing_cols = [col[1] for col in cursor.execute("PRAGMA table_info(lines)").fetchall()]
 new_cols = {
     'sub_carrier': 'TEXT',
@@ -64,15 +64,22 @@ for col_name, col_type in new_cols.items():
     if col_name not in existing_cols:
         cursor.execute(f"ALTER TABLE lines ADD COLUMN {col_name} {col_type}")
 
+# 월별 스케줄 테이블 (항목명 group_title 컬럼 추가 반영)
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS payback_schedules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     line_id INTEGER,
+    group_title TEXT,
     installment_no INTEGER,
     expected_year_month TEXT,
     FOREIGN KEY (line_id) REFERENCES lines(id) ON DELETE CASCADE
 )
 ''')
+
+# 기존 payback_schedules 테이블 마이그레이션
+ps_cols = [col[1] for col in cursor.execute("PRAGMA table_info(payback_schedules)").fetchall()]
+if 'group_title' not in ps_cols:
+    cursor.execute("ALTER TABLE payback_schedules ADD COLUMN group_title TEXT")
 
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS payback_items (
@@ -89,23 +96,34 @@ conn.commit()
 
 st.title("📱 폰테크 회선 & 월별/연간 손익 관리 앱")
 
-# Session State 초기화
-if 'payback_item_list' not in st.session_state:
-    st.session_state.payback_item_list = [
-        {"type": "네이버페이", "amount": 30000},
-        {"type": "네이버페이", "amount": 10000}
+# Session State 초기화 (복수 혜택 그룹 관리)
+if 'benefit_groups' not in st.session_state:
+    st.session_state.benefit_groups = [
+        {
+            "title": "기본 개통 혜택",
+            "start_date": date.today() + relativedelta(months=1),
+            "months_count": 5,
+            "items": [{"type": "네이버페이", "amount": 30000}]
+        },
+        {
+            "title": "친구추천 혜택",
+            "start_date": date.today() + relativedelta(months=2),
+            "months_count": 3,
+            "items": [{"type": "네이버페이", "amount": 10000}]
+        }
     ]
+
 if 'edit_line_id' not in st.session_state:
     st.session_state.edit_line_id = None
 
 # ---------------------------------------------------------
-# 1. 사이드바: 신규 등록 및 수정 폼
+# 1. 사이드바: 회선 등록 및 수정 (항목별 개별 시기/기간 설정)
 # ---------------------------------------------------------
 with st.sidebar:
     is_edit_mode = st.session_state.edit_line_id is not None
     
     if is_edit_mode:
-        st.header("✏️ 회선 및 수익 정보 수정")
+        st.header("✏️ 회선 정보 수정")
         cursor.execute("SELECT * FROM lines WHERE id = ?", (st.session_state.edit_line_id,))
         line_data = cursor.fetchone()
         
@@ -128,14 +146,14 @@ with st.sidebar:
         edit_cc_date = datetime.strptime(line_data[cols_map['cancellation_date']], "%Y-%m-%d").date() if line_data[cols_map['cancellation_date']] else date.today()
         edit_status = line_data[cols_map['status']] or "유지중"
         
-        if st.button("❌ 수정 취소하고 신규 등록으로"):
+        if st.button("❌ 수정 취소 및 신규 등록 전환"):
             st.session_state.edit_line_id = None
             st.rerun()
     else:
-        st.header("➕ 신규 회선 및 캐시백 등록")
+        st.header("➕ 신규 회선 및 세부 혜택 등록")
         edit_name = ""
         edit_phone = "010-0000-0000"
-        edit_carrier = "SKT"
+        edit_carrier = "알뜰폰(SKT망)"
         edit_sub_carrier = ""
         edit_device = ""
         edit_card = ""
@@ -156,21 +174,19 @@ with st.sidebar:
     carrier_idx = carrier_list.index(edit_carrier) if edit_carrier in carrier_list else 0
     carrier = st.selectbox("통신사", carrier_list, index=carrier_idx)
     
-    # 별정/알뜰폰 선택 시 수기 입력칸 제공
     sub_carrier = ""
     if "알뜰폰" in carrier:
         sub_carrier = st.text_input("세부 별정통신사명 수기 입력", value=edit_sub_carrier, placeholder="예: 모비티, 프리티, 핀다이렉트 등")
     
     device_model = st.text_input("휴대폰 기종", value=edit_device, placeholder="예: 갤럭시 S24, 아이폰 15")
     
-    # 3대 통신사(SKT, KT, LGU+)일 때만 정산/판매가 조건부 노출
     opening_payback = 0.0
     device_sale_price = 0.0
     if carrier in ["SKT", "KT", "LGU+"]:
         st.divider()
         st.subheader("💵 개통 초기 정산 & 기기 판매")
         opening_payback = st.number_input("개통 시 즉시 페이백 (원)", value=int(edit_op_payback), step=10000)
-        device_sale_price = st.number_input("📱 기기 판매 수익 (원)", value=int(edit_sale_price), step=10000, help="폰 팔아서 얻은 단말기 판매대금")
+        device_sale_price = st.number_input("📱 기기 판매 수익 (원)", value=int(edit_sale_price), step=10000)
     
     st.divider()
     st.subheader("💳 요금 및 결제 정보")
@@ -185,6 +201,45 @@ with st.sidebar:
     status = st.selectbox("현재 회선 상태", ["유지중", "요금제 변경 완료", "해지 완료", "번호이동 완료"], index=["유지중", "요금제 변경 완료", "해지 완료", "번호이동 완료"].index(edit_status))
 
     st.divider()
+    st.subheader("🎁 항목별 캐시백/상품권 설정")
+    st.caption("친구추천, 유지이벤트 등 항목마다 시작월과 기간을 각각 다르게 설정합니다.")
+    
+    # 세부 항목(그룹) 동적 관리
+    for g_idx, group in enumerate(st.session_state.benefit_groups):
+        with st.expander(f"📌 혜택 항목 #{g_idx+1}: {group['title']}", expanded=True):
+            group['title'] = st.text_input(f"항목 명칭 (항목 #{g_idx+1})", value=group['title'], key=f"g_title_{g_idx}")
+            c_s1, c_s2 = st.columns(2)
+            group['start_date'] = c_s1.date_input(f"지급 시작월 #{g_idx+1}", value=group['start_date'], key=f"g_start_{g_idx}")
+            group['months_count'] = c_s2.number_input(f"지급 기간(개월) #{g_idx+1}", value=group['months_count'], min_value=1, max_value=36, key=f"g_months_{g_idx}")
+            
+            st.write("월별/회차별 지급 금액")
+            for item_idx, item in enumerate(group['items']):
+                ci1, ci2 = st.columns([1.5, 1])
+                item['type'] = ci1.text_input(f"혜택종류 #{g_idx+1}-{item_idx+1}", value=item['type'], key=f"itype_{g_idx}_{item_idx}")
+                item['amount'] = ci2.number_input(f"금액 #{g_idx+1}-{item_idx+1}", value=int(item['amount']), step=5000, key=f"iamt_{g_idx}_{item_idx}")
+
+            c_item_add, c_item_del = st.columns(2)
+            if c_item_add.button(f"➕ 세부 혜택 추가 (항목 #{g_idx+1})", key=f"btn_add_item_{g_idx}"):
+                group['items'].append({"type": "네이버페이", "amount": 10000})
+                st.rerun()
+            if c_item_del.button(f"➖ 세부 혜택 삭제", key=f"btn_del_item_{g_idx}") and len(group['items']) > 1:
+                group['items'].pop()
+                st.rerun()
+
+    col_grp_add, col_grp_del = st.columns(2)
+    if col_grp_add.button("➕ 새로운 혜택 항목 추가"):
+        st.session_state.benefit_groups.append({
+            "title": f"추가 혜택 {len(st.session_state.benefit_groups)+1}",
+            "start_date": date.today() + relativedelta(months=1),
+            "months_count": 1,
+            "items": [{"type": "신세계상품권", "amount": 10000}]
+        })
+        st.rerun()
+    if col_grp_del.button("🗑️ 마지막 혜택 항목 삭제") and len(st.session_state.benefit_groups) > 1:
+        st.session_state.benefit_groups.pop()
+        st.rerun()
+
+    st.divider()
     st.subheader("📝 유의사항 및 이벤트 캡쳐")
     notes = st.text_area("기타 유의사항 / 메모", value=edit_notes, placeholder="예: 6개월 유지 필수, 데이터 사용 조건 등")
     
@@ -197,31 +252,14 @@ with st.sidebar:
     elif edit_img_bytes:
         st.image(edit_img_bytes, caption="기존 등록된 이벤트 이미지", use_container_width=True)
 
-    if not is_edit_mode:
-        st.divider()
-        st.subheader("🎁 월별 지급 상품권/캐시백 조건")
-        start_date = st.date_input("캐시백 시작 월", datetime(2026, 9, 1))
-        months_count = st.number_input("지급 개월 수", value=5, min_value=1, max_value=36)
-        
-        st.write("회차당 들어올 혜택 (네이버페이, 모바일상품권 등)")
-        for idx, item in enumerate(st.session_state.payback_item_list):
-            c1, c2 = st.columns([1.5, 1])
-            item['type'] = c1.text_input(f"수단 #{idx+1}", value=item['type'], key=f"type_{idx}")
-            item['amount'] = c2.number_input(f"금액 #{idx+1}", value=int(item['amount']), step=5000, key=f"amt_{idx}")
-
-        col_add, col_del = st.columns(2)
-        if col_add.button("➕ 혜택 추가"):
-            st.session_state.payback_item_list.append({"type": "네이버페이", "amount": 10000})
-            st.rerun()
-        if col_del.button("➖ 삭제") and len(st.session_state.payback_item_list) > 1:
-            st.session_state.payback_item_list.pop()
-            st.rerun()
-
     st.divider()
     
+    # DB 저장 로직 (항목별 스케줄 개별 생성)
     if is_edit_mode:
-        if st.button("💾 수정사항 저장하기", type="primary", use_container_width=True):
+        if st.button("💾 수정사항 저장 및 혜택 일정 재설정", type="primary", use_container_width=True):
             formatted_phone = format_phone_number(phone_raw)
+            line_id = st.session_state.edit_line_id
+            
             cursor.execute('''
             UPDATE lines 
             SET person_name=?, phone_number=?, carrier=?, sub_carrier=?, device_model=?, payment_card=?, monthly_fee=?, 
@@ -231,13 +269,31 @@ with st.sidebar:
             ''', (name, formatted_phone, carrier, sub_carrier, device_model, payment_card, monthly_fee, 
                   opening_payback, device_sale_price, opening_date.strftime("%Y-%m-%d"), 
                   plan_change_date.strftime("%Y-%m-%d"), cancellation_date.strftime("%Y-%m-%d"), 
-                  status, notes, sqlite3.Binary(img_blob) if img_blob else None, st.session_state.edit_line_id))
+                  status, notes, sqlite3.Binary(img_blob) if img_blob else None, line_id))
+            
+            # 기존 캐시백 일정 삭제 후 재생성
+            cursor.execute("DELETE FROM payback_schedules WHERE line_id = ?", (line_id,))
+            
+            for grp in st.session_state.benefit_groups:
+                base_date = datetime(grp['start_date'].year, grp['start_date'].month, 1)
+                for i in range(int(grp['months_count'])):
+                    target_date = base_date + relativedelta(months=i)
+                    ym_str = target_date.strftime("%Y-%m")
+                    
+                    cursor.execute('INSERT INTO payback_schedules (line_id, group_title, installment_no, expected_year_month) VALUES (?, ?, ?, ?)', 
+                                   (line_id, grp['title'], i + 1, ym_str))
+                    schedule_id = cursor.lastrowid
+                    
+                    for p_item in grp['items']:
+                        cursor.execute('INSERT INTO payback_items (schedule_id, item_type, amount) VALUES (?, ?, ?)', 
+                                       (schedule_id, p_item['type'], p_item['amount']))
+
             conn.commit()
             st.session_state.edit_line_id = None
-            st.success("✅ 회선 정보가 성공적으로 수정되었습니다!")
+            st.success("✅ 회선 및 세부 항목별 혜택이 성공적으로 수정되었습니다!")
             st.rerun()
     else:
-        if st.button("🚀 신규 회선 및 일정 등록", type="primary", use_container_width=True):
+        if st.button("🚀 회선 등록 및 항목별 혜택 생성", type="primary", use_container_width=True):
             if name and phone_raw:
                 formatted_phone = format_phone_number(phone_raw)
                 cursor.execute('''
@@ -248,18 +304,19 @@ with st.sidebar:
                       plan_change_date.strftime("%Y-%m-%d"), cancellation_date.strftime("%Y-%m-%d"), status, notes, sqlite3.Binary(img_blob) if img_blob else None))
                 line_id = cursor.lastrowid
                 
-                base_date = datetime(start_date.year, start_date.month, 1)
-                for i in range(int(months_count)):
-                    target_date = base_date + relativedelta(months=i)
-                    ym_str = target_date.strftime("%Y-%m")
-                    
-                    cursor.execute('INSERT INTO payback_schedules (line_id, installment_no, expected_year_month) VALUES (?, ?, ?)', 
-                                   (line_id, i + 1, ym_str))
-                    schedule_id = cursor.lastrowid
-                    
-                    for p_item in st.session_state.payback_item_list:
-                        cursor.execute('INSERT INTO payback_items (schedule_id, item_type, amount) VALUES (?, ?, ?)', 
-                                       (schedule_id, p_item['type'], p_item['amount']))
+                for grp in st.session_state.benefit_groups:
+                    base_date = datetime(grp['start_date'].year, grp['start_date'].month, 1)
+                    for i in range(int(grp['months_count'])):
+                        target_date = base_date + relativedelta(months=i)
+                        ym_str = target_date.strftime("%Y-%m")
+                        
+                        cursor.execute('INSERT INTO payback_schedules (line_id, group_title, installment_no, expected_year_month) VALUES (?, ?, ?, ?)', 
+                                       (line_id, grp['title'], i + 1, ym_str))
+                        schedule_id = cursor.lastrowid
+                        
+                        for p_item in grp['items']:
+                            cursor.execute('INSERT INTO payback_items (schedule_id, item_type, amount) VALUES (?, ?, ?)', 
+                                           (schedule_id, p_item['type'], p_item['amount']))
                     
                 conn.commit()
                 st.success(f"✅ {name}님 회선이 새로 등록되었습니다!")
@@ -270,7 +327,7 @@ with st.sidebar:
 # ---------------------------------------------------------
 tab1, tab2, tab3 = st.tabs(["🎁 월별 상품권/핀 수익 합산", "📱 전체 회선 관리", "📊 연간 폰 판매 & 총 수익 대시보드"])
 
-# TAB 1: 월별 상품권/핀 수익 체크
+# TAB 1: 월별 상품권/핀 수익 체크 (항목별 개별 조회)
 with tab1:
     query = '''
     SELECT 
@@ -283,6 +340,7 @@ with tab1:
         l.payment_card,
         l.monthly_fee,
         l.notes,
+        ps.group_title,
         ps.installment_no,
         ps.expected_year_month,
         pi.item_type,
@@ -291,7 +349,7 @@ with tab1:
     FROM payback_items pi
     JOIN payback_schedules ps ON pi.schedule_id = ps.id
     JOIN lines l ON ps.line_id = l.id
-    ORDER BY ps.expected_year_month ASC, l.person_name ASC, pi.id ASC
+    ORDER BY ps.expected_year_month ASC, l.person_name ASC, ps.group_title ASC, pi.id ASC
     '''
     df = pd.read_sql_query(query, conn)
 
@@ -313,15 +371,16 @@ with tab1:
         col_m3.metric("✅ 현재 수령 완료된 상품권액", f"{total_received:,.0f} 원", delta=f"{total_received - total_expected:,.0f} 원")
         
         st.divider()
-        st.write("#### 회선별 세부 지급 내역")
+        st.write("#### 회선 및 항목별 세부 지급 내역")
         
-        for (person, phone, carrier, sub_carrier, device, card, fee, notes, inst), group in month_df.groupby(['person_name', 'phone_number', 'carrier', 'sub_carrier', 'device_model', 'payment_card', 'monthly_fee', 'notes', 'installment_no']):
+        for (person, phone, carrier, sub_carrier, device, card, fee, notes, g_title, inst), group in month_df.groupby(['person_name', 'phone_number', 'carrier', 'sub_carrier', 'device_model', 'payment_card', 'monthly_fee', 'notes', 'group_title', 'installment_no']):
             carrier_str = f"{carrier} ({sub_carrier})" if sub_carrier else carrier
             device_info = f" | 📲 {device}" if device else ""
             card_info = f" | 💳 {card}" if card else ""
             fee_info = f" | 💸 월 {fee:,.0f}원" if fee else ""
+            g_title_str = f" [{g_title}]" if g_title else ""
             
-            with st.expander(f"👤 **{person}** ({carrier_str} / {phone}){device_info}{card_info}{fee_info} - {inst}회차", expanded=True):
+            with st.expander(f"👤 **{person}** ({carrier_str} / {phone}){device_info}{card_info}{fee_info} -{g_title_str} `{inst}회차`", expanded=True):
                 if notes:
                     st.info(f"📌 **유의사항/메모:** {notes}")
                 for _, row in group.iterrows():
@@ -342,7 +401,7 @@ with tab1:
     else:
         st.info("등록된 회선이 없습니다. 사이드바에서 첫 번째 회선을 등록해 보세요.")
 
-# TAB 2: 전체 회선 목록 (수정 / 삭제 / 메모 및 이미지 미리보기)
+# TAB 2: 전체 회선 관리
 with tab2:
     st.subheader("📋 전체 회선 정보 및 D-Day 현황")
     lines_df = pd.read_sql_query("SELECT * FROM lines ORDER BY id DESC", conn)
@@ -396,7 +455,7 @@ with tab2:
     else:
         st.info("등록된 회선이 없습니다.")
 
-# TAB 3: 연간 폰 판매 & 총 수익 대시보드
+# TAB 3: 연간 결산 대시보드
 with tab3:
     st.subheader("📈 연간 폰 판매 수익 & 통합 결산 대시보드")
     
